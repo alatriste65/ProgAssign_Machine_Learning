@@ -1,0 +1,189 @@
+---
+title: "Practical Machine Learning - Programming Assignment"
+output: html_document
+---
+
+```{r setoptions,echo=FALSE}
+library(knitr)
+opts_chunk$set(echo=TRUE)
+options(scipen =1,digits=2)
+opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+```
+
+#Executive Summary
+The goal of this assignment is to predict the manner in which 6 individuals did exercise using data from accelerometers. 
+Any variables of the data set can be used in order to build the prediction model. 
+The resulting prediction model shall be used to predict the outcome "classe" for 20 different test cases.
+
+In order to predict the model, first we split the training set into a training and a validation dataset. Then we proceed to clean the data, that is, we check if there are any superfluous measurements in the training set. For example we delete all variables with a NA proportion over 60%. Moreover we look into the class of the variables. All modifications carried out in the training set, will also be applied to the validation and testing sets.
+
+Finally we build a prediction model on the training set and evaluate its performance on the validation set before we apply it to the 20 test cases of the testing set. We compare the accuracy of three different prediction algorithms: decision trees, random forest and boosted regression.
+
+Since the prediction model based on random forest algorithm is the one with the greatest overall accuracy, it will applied to predict the outcome of the testing set.
+
+
+#Getting and cleaning data
+First of all, we load all the packages we will need into our library:
+
+```{r,results="hide",message=FALSE,warning=FALSE}
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(randomForest)
+library(corrplot)
+```
+Next we download the data from the url made available in the task description and read the data into R. Note that when reading the datai into R we will set certain character strings to NA. 
+```{r,cache=TRUE}
+#Link for data
+urltrain<-"http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+urltest<-"http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+download.file(urltrain,"D:/Data Science/Practical machine learning/Exercises/Programming_Assignment/Raw_data/pml-training.csv")
+download.file(urltest,"D:/Data Science/Practical machine learning/Exercises/Programming_Assignment/Raw_data/pml-testing.csv")
+
+pmltraining<-read.csv("D:/Data Science/Practical machine learning/Exercises/Programming_Assignment/Raw_data/pml-training.csv",dec=".",sep=",",header=TRUE,stringsAsFactors=FALSE,na.strings=c("NA","","#DIV/0!"))
+pmltesting<-read.csv("D:/Data Science/Practical machine learning/Exercises/Programming_Assignment/Raw_data/pml-testing.csv",dec=".",sep=",",header=TRUE,stringsAsFactors=FALSE,na.strings=c("NA","","#DIV/0!"))
+```
+
+The training set will be split into training and validation set. The testing data set includes the 20 test cases for which we are to predict how the exercise was carried out.The resulting training test includes 11776 observations while the validation set includes 7846 observations.
+```{r}
+set.seed(23466)
+intrain<-createDataPartition(pmltraining$classe,p=0.6,list=FALSE)
+training<-pmltraining[intrain,]
+validation<-pmltraining[-intrain,]
+
+dim(training)
+dim(validation)
+```
+Next we need to clean the training set and apply the modifications to the validation and test sets.
+First we delete the first column, since this is just the observation/row identifier. Then we only keep dimensions (columns) where the proportion of NAs is less than 60 percent.
+```{r}
+training<-training[,-1]
+numNA<-do.call(rbind,lapply(1:(dim(training)[2]),function(i){sum(is.na(training[,i]))}))
+propNA<-numNA/(dim(training)[1])
+training2<-training[,which(propNA<0.6)]
+```
+
+Next we check if there are any variables with near zero variables. Only the variable "new_window" is identified as one. This is a categorical variable with two levels. I decided not to delete this variable from the set of potential predictors.
+```{r}
+nzvar<-nearZeroVar(training2,saveMetrics=TRUE)
+colnames(training2)[nzvar$nzv==TRUE]
+table(training2[,"new_window"]) #factor variable with two levels. I wont delete it
+```
+Since we have already deleted some measurements from the training set, we need to make sure that these variables are also droped in the the validation and testing sets. 
+```{r}
+#validation and testing set, should have exactly the same variables
+validation2<-validation[,which(colnames(validation) %in% colnames(training2))]
+testing<-pmltesting[,which(colnames(pmltesting) %in% colnames(training2))]
+```
+
+Next we check the class of the variables of the training set and select out those which are not integer or numeric. The variables classe, username and newwindow are turned into factor variables. The variable cvtd_timestamp is turned into a date-variable and than forced into integer class. 
+These modifications of the class of the variables of the training set is applied to the validation and testing sets.
+```{r}
+class<-do.call(rbind,lapply(1:(dim(training2)[2]),function(x){cl<-class(training2[,x])}))
+table(class)
+colsindx<-which(class != "integer" & class!= "numeric") #index of variables which are neither numeric nor integer
+View(head(training2[,colsindx]))
+str(training2[,colsindx])
+#Analyse these variables, should their class be transformed?
+table(training2$classe) #5 levels, turn into a factor variable
+table(training2$user_name) #6 levels, these are names, turn also into a factor variable
+table(training2$new_window)# 2 levels, tur also into a factor variable
+#cvtd_timestamp should be change into date format and than numeric
+
+#Change the class of the variables
+training3<-training2
+training3$cvtd_timestamp<-as.integer(as.numeric(strptime(training3$cvtd_timestamp,format="%d/%m/%Y %H:%M")))
+training3$classe<-as.factor(training3$classe)
+training3$user_name<-as.factor(training3$user_name)
+training3$new_window<-as.factor(training3$new_window)
+str(training3)
+
+#Apply the class transformation to the validation and testing data sets
+validation3<-validation2
+validation3$cvtd_timestamp<-as.integer(as.numeric(strptime(validation3$cvtd_timestamp,format="%d/%m/%Y %H:%M")))
+validation3$classe<-as.factor(validation3$classe)
+validation3$user_name<-factor(validation3$user_name,levels=levels(training3[,"user_name"]))
+validation3$new_window<-factor(validation3$new_window,levels=levels(training3[,"new_window"]))
+testing2<-testing
+testing2$cvtd_timestamp<-as.integer(as.numeric(strptime(testing2$cvtd_timestamp,format="%d/%m/%Y %H:%M")))
+testing2$user_name<-factor(testing2$user_name,levels=levels(training3[,"user_name"]))
+testing2$new_window<-factor(testing2$new_window,levels=levels(training3[,"new_window"]))
+```
+Next we check the correlation between the different time-variales available in the training set, i.e. rawtimestamppart1, rwatimestamppart2 and cvtdtimestamp.
+Since the correlation between rawtimestamppart1 and cvstdtimestamp is 1, the latter will be deleted from the training set. Recall that we turned cvstdtimestamp was a character variable, that we turned in to date format and than into numeric. This information seems to already have been included in the variable rawtimestamppart1, an originally numeric variable.
+```{r}
+corrmat<-cor(training3[,2:4])
+#Correlation between raw_timestamp_part_1 and cvtd_timestamp is 1. 
+fin_training<-training3[,-which(colnames(training3)=="cvtd_timestamp")]
+fin_validation<-validation3[,-which(colnames(validation3)=="cvtd_timestamp")]
+fin_testing<-testing2[,-which(colnames(testing2)=="cvtd_timestamp")]
+```
+The final training and validation data sets include 58 variables, the testing set includes only 57 variables since the outcome variable "classe" in not included.
+```{r}
+dim(fin_training)
+dim(fin_validation)
+dim(fin_testing)
+```
+
+#Building the prediction model
+
+##Prediction with decision tree
+First we use a decision tree to fit a model for predicting the outcome in out training set. The resulting decision tree is plotted using the command fancyRpartPlot. Moreover we check the variable importance.
+```{r}
+set.seed(12345)
+moddtree<-rpart(classe~.,data=fin_training,method="class")
+varImp(moddtree,useModel=TRUE)
+fancyRpartPlot(moddtree)
+```
+
+Next we apply the prediction algorithm to the validation set and obtain the confusion matrix. According to the output of the confusion matrix, the decision tree prediction algorithm has an overall accuracy of 0.816 in the validation data set.
+```{r}
+preddtree<-predict(moddtree,fin_validation,type="class")
+conmatdtree<-confusionMatrix(preddtree,fin_validation$classe)
+conmatdtree
+```
+Next we plot the results of the confusion matrix.
+```{r}
+plot(conmatdtree$table,col=conmatdtree$byClass,main=paste0("Confusion Matrix for Decision Tree. Accuracy:",round(conmatdtree$overall["Accuracy"],3)))
+```
+
+##Prediction with Random Forest
+Next we use random forest to build a prediction algorithm on the training set and obtain the variance importance.
+```{r}
+set.seed(12345)
+modrf<-randomForest(classe~.,data=fin_training)
+varImp(modrf,useModel=TRUE)
+```
+Next we apply the random forest prediction algorithm on the validation set and obtain the confusion matrix. We plot the results. The overall accuracy of the random forest prediction algorithm on the validation set is 0.999.
+```{r}
+predrf<-predict(modrf,fin_validation,type="response")
+conmatrf<-confusionMatrix(predrf,fin_validation$classe)
+conmatrf
+plot(conmatrf$table,col=conmatrf$byClass,main=paste0("Confusion Matrix for Random Forest. Accuracy:",round(conmatrf$overall["Accuracy"],3)))
+```
+
+##Prediction with Generalized Boosted Regression
+Next and last we build a prediction algorithm using boosted regression.
+```{r,cache=TRUE,message=FALSE,warning=FALSE}
+set.seed(12345)
+fitControl<-trainControl(method="repeatedcv",number=5,repeats=1)
+modgbm<-train(classe~.,data=fin_training,method="gbm",trControl=fitControl,verbose=FALSE)
+modgbm
+```
+Next we apply the prediction algorithm we build on the training set to the validation set and obtain the confusion matrix. Plot the results. The overall accuracy of the the prediction algorithm on the validation set is 0.996.
+```{r}
+predgbm<-predict(modgbm,fin_validation)
+conmatgbm<-confusionMatrix(predgbm,fin_validation$classe)
+conmatgbm
+
+plot(conmatgbm$table,col=conmatgbm$byClass,main=paste0("Confusion Matrix for Generalized Boosting. Accuracy:",round(conmatgbm$overall["Accuracy"],3)))
+```
+
+#Apply the prediction model based on the random forest algorith to the 20 test cases
+Next we obtain the predictions on the 20 test cases and create a text file with the output for each one of the 20 cases.
+```{r}
+predtestrf<-predict(modrf,fin_testing)
+predtestrf
+```
